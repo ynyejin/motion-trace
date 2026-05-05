@@ -6,9 +6,10 @@ mp_drawing = mp.solutions.drawing_utils
 
 pose = mp_pose.Pose()
 
-cap = cv2.VideoCapture(0)
+# 영상 입력
+cap = cv2.VideoCapture("data/test.mp4")
 
-while True:
+while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
@@ -23,10 +24,11 @@ while True:
             mp_pose.POSE_CONNECTIONS
         )
 
-    cv2.imshow("DanceForge Pose Test", frame)
+    cv2.imshow("MotionTrace Video Test", frame)
 
-    if cv2.waitKey(1) & 0xFF == 27:  # ESC 누르면 종료
+    if cv2.waitKey(25) & 0xFF == 27:
         break
 
 cap.release()
 cv2.destroyAllWindows()
+pose.close()
