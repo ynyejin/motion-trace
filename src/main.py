@@ -72,6 +72,10 @@ UPPER_COLOR = (255, 0, 0)
 LOWER_COLOR = (0, 0, 255)
 POINT_COLOR = (0, 255, 255)
 
+# Phase 5: 관절 튐 완화 설정
+SMOOTHING_ALPHA = 0.6
+JUMP_THRESHOLD = 120
+
 
 def extract_keypoints(results, width, height):
     keypoints = {}
@@ -124,6 +128,38 @@ def draw_overlay(frame, keypoints):
 
 def calculate_distance(p1, p2):
     return np.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+
+
+def smooth_keypoints(current_keypoints, previous_keypoints):
+    if previous_keypoints is None:
+        return current_keypoints
+
+    smoothed = {}
+
+    for joint, current_point in current_keypoints.items():
+        if joint not in previous_keypoints:
+            smoothed[joint] = current_point
+            continue
+
+        prev_point = previous_keypoints[joint]
+        distance = calculate_distance(prev_point, current_point)
+
+        # 갑자기 너무 멀리 튀면 이전 좌표를 더 많이 반영
+        if distance > JUMP_THRESHOLD:
+            x = int(prev_point[0] * 0.8 + current_point[0] * 0.2)
+            y = int(prev_point[1] * 0.8 + current_point[1] * 0.2)
+        else:
+            x = int(prev_point[0] * (1 - SMOOTHING_ALPHA) + current_point[0] * SMOOTHING_ALPHA)
+            y = int(prev_point[1] * (1 - SMOOTHING_ALPHA) + current_point[1] * SMOOTHING_ALPHA)
+
+        smoothed[joint] = (x, y)
+
+    # 현재 프레임에서 관절이 사라지면 이전 좌표로 보간
+    for joint, prev_point in previous_keypoints.items():
+        if joint not in smoothed:
+            smoothed[joint] = prev_point
+
+    return smoothed
 
 
 def calculate_energy(current_keypoints, previous_keypoints, target_joints):
@@ -234,6 +270,13 @@ def save_report(energy_rows, angle_rows):
     max_time = max_energy_row[1]
     max_energy = max_energy_row[4]
 
+    if upper_ratio > lower_ratio:
+        main_body_part = "상체 중심"
+    elif lower_ratio > upper_ratio:
+        main_body_part = "하체 중심"
+    else:
+        main_body_part = "상체와 하체가 균형적인"
+
     angle_summary = {}
 
     for row in angle_rows:
@@ -249,30 +292,41 @@ def save_report(energy_rows, angle_rows):
         f.write("DanceForge Motion Analysis Report\n")
         f.write("=================================\n\n")
 
-        f.write("Energy Summary\n")
-        f.write("--------------\n")
-        f.write(f"Total Energy: {total_energy:.2f}\n")
-        f.write(f"Upper Body Energy Ratio: {upper_ratio:.2f}%\n")
-        f.write(f"Lower Body Energy Ratio: {lower_ratio:.2f}%\n\n")
+        f.write("[프로젝트 요약]\n")
+        f.write("입력된 안무 영상에서 MediaPipe Pose를 이용해 주요 관절을 추출하고,\n")
+        f.write("프레임별 관절 좌표, 움직임 에너지, 관절 각도를 기반으로 안무의 움직임 패턴을 분석하였다.\n\n")
 
-        f.write("Highest Energy Moment\n")
-        f.write("---------------------\n")
-        f.write(f"Frame: {max_frame}\n")
-        f.write(f"Time: {max_time:.2f} sec\n")
-        f.write(f"Energy: {max_energy:.2f}\n\n")
+        f.write("[전처리 및 안정화]\n")
+        f.write("관절 좌표가 순간적으로 튀는 현상을 줄이기 위해 이전 프레임 좌표를 활용한 smoothing 처리를 적용하였다.\n")
+        f.write("특정 관절이 일시적으로 검출되지 않는 경우에는 이전 프레임의 좌표를 사용하여 보간하였다.\n\n")
 
-        f.write("Joint Angle Summary\n")
-        f.write("-------------------\n")
+        f.write("[움직임 에너지 분석]\n")
+        f.write(f"- 전체 움직임 에너지: {total_energy:.2f}\n")
+        f.write(f"- 상체 움직임 비중: {upper_ratio:.2f}%\n")
+        f.write(f"- 하체 움직임 비중: {lower_ratio:.2f}%\n")
+        f.write(f"- 분석 결과, 이 안무는 {main_body_part} 움직임이 두드러진다.\n\n")
+
+        f.write("[킬링파트 자동 감지]\n")
+        f.write(f"- 가장 움직임이 큰 구간은 {max_time:.2f}초 지점이다.\n")
+        f.write(f"- 해당 프레임 번호: {max_frame}\n")
+        f.write(f"- 해당 구간 에너지 값: {max_energy:.2f}\n\n")
+
+        f.write("[관절 각도 요약]\n")
 
         for joint, angle_list in angle_summary.items():
             avg_angle = np.mean(angle_list)
             min_angle = np.min(angle_list)
             max_angle = np.max(angle_list)
 
-            f.write(f"{joint}\n")
-            f.write(f"  Average Angle: {avg_angle:.2f} degrees\n")
-            f.write(f"  Min Angle: {min_angle:.2f} degrees\n")
-            f.write(f"  Max Angle: {max_angle:.2f} degrees\n\n")
+            f.write(f"- {joint}\n")
+            f.write(f"  평균 각도: {avg_angle:.2f}도\n")
+            f.write(f"  최소 각도: {min_angle:.2f}도\n")
+            f.write(f"  최대 각도: {max_angle:.2f}도\n")
+
+        f.write("\n[결론]\n")
+        f.write("본 시스템은 안무 영상에서 사람의 주요 관절을 추출하고,\n")
+        f.write("2D 스틱 아바타, 움직임 에너지, 관절 각도, 3D 궤적 그래프를 통해\n")
+        f.write("안무의 동작 특성을 시각적이고 정량적으로 분석할 수 있다.\n")
 
 
 cap = cv2.VideoCapture(VIDEO_PATH)
@@ -312,6 +366,7 @@ while True:
     results = pose.process(rgb_frame)
 
     keypoints = extract_keypoints(results, width, height)
+    keypoints = smooth_keypoints(keypoints, previous_keypoints)
 
     for joint, (x, y) in keypoints.items():
         pose_rows.append([frame_idx, time_sec, joint, x, y])
@@ -343,7 +398,7 @@ while True:
 
     combined = np.hstack((overlay_frame, avatar_frame))
 
-    cv2.imshow("DanceForge - Phase 3 Motion Analysis", combined)
+    cv2.imshow("DanceForge - Motion Analysis", combined)
     out.write(combined)
 
     previous_keypoints = keypoints.copy()
@@ -362,7 +417,7 @@ save_energy_csv(energy_rows)
 save_angle_csv(angle_rows)
 save_report(energy_rows, angle_rows)
 
-print("Phase 3 완료!")
+print("Phase 5 일부 완료!")
 print(f"영상 저장: {OUTPUT_VIDEO_PATH}")
 print(f"관절 좌표 저장: {POSE_CSV_PATH}")
 print(f"에너지 데이터 저장: {ENERGY_CSV_PATH}")
