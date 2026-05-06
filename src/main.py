@@ -4,7 +4,9 @@ import numpy as np
 import os
 import csv
 
-VIDEO_PATH = "data/test.mp4"
+VIDEO_PATH = os.environ.get("VIDEO_PATH", "data/test.mp4")
+SHOW_WINDOW = os.environ.get("SHOW_WINDOW", "1") == "1"
+
 OUTPUT_VIDEO_PATH = "output/avatar_side_by_side.mp4"
 POSE_CSV_PATH = "output/pose_data.csv"
 ENERGY_CSV_PATH = "output/energy_data.csv"
@@ -14,14 +16,6 @@ REPORT_PATH = "output/summary_report.txt"
 os.makedirs("output", exist_ok=True)
 
 mp_pose = mp.solutions.pose
-
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=1,
-    enable_segmentation=False,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
 
 LANDMARKS = {
     "left_shoulder": mp_pose.PoseLandmark.LEFT_SHOULDER,
@@ -72,7 +66,6 @@ UPPER_COLOR = (255, 0, 0)
 LOWER_COLOR = (0, 0, 255)
 POINT_COLOR = (0, 255, 255)
 
-# Phase 5: 관절 튐 완화 설정
 SMOOTHING_ALPHA = 0.6
 JUMP_THRESHOLD = 120
 
@@ -92,19 +85,146 @@ def extract_keypoints(results, width, height):
     return keypoints
 
 
+def draw_thick_segment(img, p1, p2, thickness_start, thickness_end, color):
+    p1 = np.array(p1, dtype=np.float32)
+    p2 = np.array(p2, dtype=np.float32)
+
+    direction = p2 - p1
+    length = np.linalg.norm(direction)
+
+    if length == 0:
+        return
+
+    direction = direction / length
+    perpendicular = np.array([-direction[1], direction[0]])
+
+    p1_offset = perpendicular * (thickness_start / 2)
+    p2_offset = perpendicular * (thickness_end / 2)
+
+    polygon = np.array([
+        p1 + p1_offset,
+        p2 + p2_offset,
+        p2 - p2_offset,
+        p1 - p1_offset
+    ], dtype=np.int32)
+
+    cv2.fillPoly(img, [polygon], color, lineType=cv2.LINE_AA)
+
+    cv2.circle(img, tuple(p1.astype(int)), int(thickness_start / 2), color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, tuple(p2.astype(int)), int(thickness_end / 2), color, -1, lineType=cv2.LINE_AA)
+
+
+def draw_glow(img, mask_color=(80, 180, 255)):
+    glow = cv2.GaussianBlur(img, (0, 0), 10)
+    return cv2.addWeighted(glow, 0.35, img, 1.0, 0)
+
+
 def draw_avatar(frame, keypoints):
     avatar = np.zeros_like(frame)
+    avatar[:] = (8, 8, 12)
 
-    for start, end in UPPER_BODY_CONNECTIONS:
+    body_color = (70, 190, 255)
+    arm_color = (255, 145, 90)
+    leg_color = (110, 135, 255)
+    head_color = (230, 230, 235)
+    outline_color = (255, 255, 255)
+    joint_color = (255, 255, 255)
+
+    # 몸통: 어깨~골반을 채운 실루엣 형태
+    torso_joints = ["left_shoulder", "right_shoulder", "right_hip", "left_hip"]
+
+    if all(j in keypoints for j in torso_joints):
+        ls = np.array(keypoints["left_shoulder"])
+        rs = np.array(keypoints["right_shoulder"])
+        rh = np.array(keypoints["right_hip"])
+        lh = np.array(keypoints["left_hip"])
+
+        shoulder_width = np.linalg.norm(rs - ls)
+        hip_width = np.linalg.norm(rh - lh)
+
+        shoulder_expand = max(6, shoulder_width * 0.08)
+        hip_expand = max(5, hip_width * 0.06)
+
+        shoulder_dir = rs - ls
+        hip_dir = rh - lh
+
+        if np.linalg.norm(shoulder_dir) != 0:
+            shoulder_dir = shoulder_dir / np.linalg.norm(shoulder_dir)
+        if np.linalg.norm(hip_dir) != 0:
+            hip_dir = hip_dir / np.linalg.norm(hip_dir)
+
+        torso = np.array([
+            ls - shoulder_dir * shoulder_expand,
+            rs + shoulder_dir * shoulder_expand,
+            rh + hip_dir * hip_expand,
+            lh - hip_dir * hip_expand
+        ], dtype=np.int32)
+
+        cv2.fillPoly(avatar, [torso], body_color, lineType=cv2.LINE_AA)
+        cv2.polylines(avatar, [torso], True, outline_color, 2, lineType=cv2.LINE_AA)
+
+    # 팔: 위팔은 두껍게, 아래팔은 조금 얇게
+    arm_segments = [
+        ("left_shoulder", "left_elbow", 24, 20),
+        ("left_elbow", "left_wrist", 20, 14),
+        ("right_shoulder", "right_elbow", 24, 20),
+        ("right_elbow", "right_wrist", 20, 14),
+    ]
+
+    for start, end, t1, t2 in arm_segments:
         if start in keypoints and end in keypoints:
-            cv2.line(avatar, keypoints[start], keypoints[end], UPPER_COLOR, 4)
+            draw_thick_segment(avatar, keypoints[start], keypoints[end], t1, t2, arm_color)
 
-    for start, end in LOWER_BODY_CONNECTIONS:
+    # 다리: 허벅지는 두껍게, 종아리는 조금 얇게
+    leg_segments = [
+        ("left_hip", "left_knee", 30, 24),
+        ("left_knee", "left_ankle", 24, 16),
+        ("right_hip", "right_knee", 30, 24),
+        ("right_knee", "right_ankle", 24, 16),
+    ]
+
+    for start, end, t1, t2 in leg_segments:
         if start in keypoints and end in keypoints:
-            cv2.line(avatar, keypoints[start], keypoints[end], LOWER_COLOR, 4)
+            draw_thick_segment(avatar, keypoints[start], keypoints[end], t1, t2, leg_color)
 
+    # 골반 연결
+    if "left_hip" in keypoints and "right_hip" in keypoints:
+        draw_thick_segment(
+            avatar,
+            keypoints["left_hip"],
+            keypoints["right_hip"],
+            22,
+            22,
+            body_color
+        )
+
+    # 목 + 머리
+    if "left_shoulder" in keypoints and "right_shoulder" in keypoints:
+        ls = np.array(keypoints["left_shoulder"])
+        rs = np.array(keypoints["right_shoulder"])
+
+        shoulder_center = ((ls + rs) / 2).astype(int)
+        shoulder_width = np.linalg.norm(ls - rs)
+
+        head_radius = int(max(18, shoulder_width * 0.25))
+        neck_top = (
+            int(shoulder_center[0]),
+            int(shoulder_center[1] - shoulder_width * 0.30)
+        )
+        head_center = (
+            int(shoulder_center[0]),
+            int(shoulder_center[1] - shoulder_width * 0.72)
+        )
+
+        cv2.line(avatar, tuple(shoulder_center), neck_top, body_color, 14, lineType=cv2.LINE_AA)
+        cv2.circle(avatar, head_center, head_radius, head_color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(avatar, head_center, head_radius, outline_color, 2, lineType=cv2.LINE_AA)
+
+    # 관절 포인트는 작게만 표시
     for point in keypoints.values():
-        cv2.circle(avatar, point, 6, POINT_COLOR, -1)
+        cv2.circle(avatar, point, 4, joint_color, -1, lineType=cv2.LINE_AA)
+
+    avatar = draw_glow(avatar)
 
     return avatar
 
@@ -144,7 +264,6 @@ def smooth_keypoints(current_keypoints, previous_keypoints):
         prev_point = previous_keypoints[joint]
         distance = calculate_distance(prev_point, current_point)
 
-        # 갑자기 너무 멀리 튀면 이전 좌표를 더 많이 반영
         if distance > JUMP_THRESHOLD:
             x = int(prev_point[0] * 0.8 + current_point[0] * 0.2)
             y = int(prev_point[1] * 0.8 + current_point[1] * 0.2)
@@ -154,7 +273,6 @@ def smooth_keypoints(current_keypoints, previous_keypoints):
 
         smoothed[joint] = (x, y)
 
-    # 현재 프레임에서 관절이 사라지면 이전 좌표로 보간
     for joint, prev_point in previous_keypoints.items():
         if joint not in smoothed:
             smoothed[joint] = prev_point
@@ -325,101 +443,120 @@ def save_report(energy_rows, angle_rows):
 
         f.write("\n[결론]\n")
         f.write("본 시스템은 안무 영상에서 사람의 주요 관절을 추출하고,\n")
-        f.write("2D 스틱 아바타, 움직임 에너지, 관절 각도, 3D 궤적 그래프를 통해\n")
+        f.write("2D 실루엣 아바타, 움직임 에너지, 관절 각도, 3D 궤적 그래프를 통해\n")
         f.write("안무의 동작 특성을 시각적이고 정량적으로 분석할 수 있다.\n")
 
 
-cap = cv2.VideoCapture(VIDEO_PATH)
+def run_analysis():
+    pose = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        enable_segmentation=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
 
-if not cap.isOpened():
-    print("영상 파일을 열 수 없습니다.")
-    exit()
+    cap = cv2.VideoCapture(VIDEO_PATH)
 
-fps = cap.get(cv2.CAP_PROP_FPS)
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if not cap.isOpened():
+        print("영상 파일을 열 수 없습니다.")
+        return
 
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(
-    OUTPUT_VIDEO_PATH,
-    fourcc,
-    fps,
-    (width * 2, height)
-)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-pose_rows = []
-energy_rows = []
-angle_rows = []
+    if fps == 0:
+        fps = 30
 
-previous_keypoints = None
-frame_idx = 0
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(
+        OUTPUT_VIDEO_PATH,
+        fourcc,
+        fps,
+        (width * 2, height)
+    )
 
-while True:
-    ret, frame = cap.read()
+    pose_rows = []
+    energy_rows = []
+    angle_rows = []
 
-    if not ret:
-        break
+    previous_keypoints = None
+    frame_idx = 0
 
-    time_sec = frame_idx / fps
+    while True:
+        ret, frame = cap.read()
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb_frame)
+        if not ret:
+            break
 
-    keypoints = extract_keypoints(results, width, height)
-    keypoints = smooth_keypoints(keypoints, previous_keypoints)
+        time_sec = frame_idx / fps
 
-    for joint, (x, y) in keypoints.items():
-        pose_rows.append([frame_idx, time_sec, joint, x, y])
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
 
-    upper_energy = calculate_energy(keypoints, previous_keypoints, UPPER_BODY)
-    lower_energy = calculate_energy(keypoints, previous_keypoints, LOWER_BODY)
-    total_energy = upper_energy + lower_energy
+        keypoints = extract_keypoints(results, width, height)
+        keypoints = smooth_keypoints(keypoints, previous_keypoints)
 
-    energy_rows.append([
-        frame_idx,
-        time_sec,
-        upper_energy,
-        lower_energy,
-        total_energy
-    ])
+        for joint, (x, y) in keypoints.items():
+            pose_rows.append([frame_idx, time_sec, joint, x, y])
 
-    angles = calculate_joint_angles(keypoints)
+        upper_energy = calculate_energy(keypoints, previous_keypoints, UPPER_BODY)
+        lower_energy = calculate_energy(keypoints, previous_keypoints, LOWER_BODY)
+        total_energy = upper_energy + lower_energy
 
-    for joint, angle in angles.items():
-        angle_rows.append([
+        energy_rows.append([
             frame_idx,
             time_sec,
-            joint,
-            angle
+            upper_energy,
+            lower_energy,
+            total_energy
         ])
 
-    overlay_frame = draw_overlay(frame, keypoints)
-    avatar_frame = draw_avatar(frame, keypoints)
+        angles = calculate_joint_angles(keypoints)
 
-    combined = np.hstack((overlay_frame, avatar_frame))
+        for joint, angle in angles.items():
+            angle_rows.append([
+                frame_idx,
+                time_sec,
+                joint,
+                angle
+            ])
 
-    cv2.imshow("DanceForge - Motion Analysis", combined)
-    out.write(combined)
+        overlay_frame = draw_overlay(frame, keypoints)
+        avatar_frame = draw_avatar(frame, keypoints)
+        combined = np.hstack((overlay_frame, avatar_frame))
 
-    previous_keypoints = keypoints.copy()
-    frame_idx += 1
+        out.write(combined)
 
-    if cv2.waitKey(1) & 0xFF == 27:
-        break
+        if SHOW_WINDOW:
+            cv2.imshow("DanceForge - Motion Analysis", combined)
 
-cap.release()
-out.release()
-pose.close()
-cv2.destroyAllWindows()
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
 
-save_pose_csv(pose_rows)
-save_energy_csv(energy_rows)
-save_angle_csv(angle_rows)
-save_report(energy_rows, angle_rows)
+        previous_keypoints = keypoints.copy()
+        frame_idx += 1
 
-print("Phase 5 일부 완료!")
-print(f"영상 저장: {OUTPUT_VIDEO_PATH}")
-print(f"관절 좌표 저장: {POSE_CSV_PATH}")
-print(f"에너지 데이터 저장: {ENERGY_CSV_PATH}")
-print(f"각도 데이터 저장: {ANGLE_CSV_PATH}")
-print(f"분석 리포트 저장: {REPORT_PATH}")
+    cap.release()
+    out.release()
+    pose.close()
+
+    if SHOW_WINDOW:
+        cv2.destroyAllWindows()
+
+    save_pose_csv(pose_rows)
+    save_energy_csv(energy_rows)
+    save_angle_csv(angle_rows)
+    save_report(energy_rows, angle_rows)
+
+    print("DanceForge 분석 완료!")
+    print(f"영상 저장: {OUTPUT_VIDEO_PATH}")
+    print(f"관절 좌표 저장: {POSE_CSV_PATH}")
+    print(f"에너지 데이터 저장: {ENERGY_CSV_PATH}")
+    print(f"각도 데이터 저장: {ANGLE_CSV_PATH}")
+    print(f"분석 리포트 저장: {REPORT_PATH}")
+
+
+if __name__ == "__main__":
+    run_analysis()
